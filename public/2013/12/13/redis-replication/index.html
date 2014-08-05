@@ -1,0 +1,380 @@
+
+ <!DOCTYPE HTML>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  
+    <title>Redis Replication | Chova&#39;s house</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1,user-scalable=no">
+    
+    <meta name="author" content="Chova">
+    
+    <meta name="description" itemprop="description" content="Redis的主从实现">
+    
+    
+    
+    
+    
+    <link rel="icon" href="/img/favicon.ico">
+    
+    
+    <link rel="apple-touch-icon" href="/img/pacman.jpg">
+    <link rel="apple-touch-icon-precomposed" href="/img/pacman.jpg">
+    
+    <link rel="stylesheet" href="/css/style.css" type="text/css">
+</head>
+
+  <body>
+    <header>
+      <div>
+		
+			<div id="imglogo">
+				<a href="/"><img src="/img/logo.svg" alt="Chova&#39;s house" title="Chova&#39;s house"/></a>
+			</div>
+			
+			<div id="textlogo">
+				<h1 class="site-name"><a href="/" title="Chova&#39;s house">Chova&#39;s house</a></h1>
+				<h2 class="blog-motto"></h2>
+			</div>
+			<div class="navbar"><a class="navbutton navmobile" href="#" title="菜单">
+			</a></div>
+			<nav class="animated">
+				<ul>
+					<ul>
+					 
+						<li><a href="/">Home</a></li>
+					
+						<li><a href="/archives">Archives</a></li>
+					
+					<li>
+					
+					<form class="search" action="//google.com/search" method="get" accept-charset="utf-8">
+						<label>Search</label>
+						<input type="search" id="search" name="q" autocomplete="off" maxlength="20" placeholder="Search" />
+						<input type="hidden" name="q" value="site:chongit.github.io">
+					</form>
+					
+					</li>
+				</ul>
+			</nav>			
+</div>
+    </header>
+    <div id="container">
+      <div id="main" class="post" itemscope itemprop="blogPost">
+	<article itemprop="articleBody"> 
+		<header class="article-info clearfix">
+  <h1 itemprop="name">
+    
+      <a href="/2013/12/13/redis-replication/" title="Redis Replication" itemprop="url">Redis Replication</a>
+  </h1>
+  <p class="article-author">By
+    
+      <a href="http://chongit.github.io" title="Chova">Chova</a>
+    </p>
+  <p class="article-time">
+    <time datetime="2013-12-13T09:11:54.000Z" itemprop="datePublished">12月 13 2013</time>
+    更新日期:<time datetime="2014-02-26T07:02:26.000Z" itemprop="dateModified">2月 26 2014</time>
+    
+  </p>
+</header>
+	<div class="article-content">
+		
+		
+		<div id="toc" class="toc-article">
+			<strong class="toc-title">文章目录</strong>
+		<ol class="toc"><li class="toc-item toc-level-2"><a class="toc-link" href="#replication"><span class="toc-number">1.</span> <span class="toc-text">Replication</span></a></li><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#replication-"><span class="toc-number">1.1.</span> <span class="toc-text">Replication怎么工作</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#-"><span class="toc-number">1.2.</span> <span class="toc-text">块同步</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#-"><span class="toc-number">1.3.</span> <span class="toc-text">配置</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#-slave-master-"><span class="toc-number">1.4.</span> <span class="toc-text">设置slave到master的认证</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#allow-writes-only-with-n-attached-replicas"><span class="toc-number">1.5.</span> <span class="toc-text">Allow writes only with N attached replicas</span></a></li></ol>
+		</div>
+		
+		<h2 id="replication">Replication</h2>
+<p><a href="http://redis.io/topics/replication" target="_blank">原文地址</a></p>
+<p>Replication功能可以通过一个简单的配置实现master--slave的复制，它允许slave节点从master节点中抽取复制数据。</p>
+<p>以下是replication非常重要的特点：</p>
+<ul>
+<li>redis使用异步的复制。从2.8开始，slaves会周期性（每秒一次）的发送acknowledge。</li>
+<li>一个master可以有多个slave。</li>
+<li>slave可以接受其他slave的连接。除了连接多个slave到同一个相同master，slave也可以连接其他slave以此构成一个图的结构。</li>
+<li>Replication在master端是非阻塞，这意味着master在其slaves提交第一个同步时也可以继续执行查询。</li>
+<li>Replication在slave端是非阻塞的，slave可以在提交第一个同步的同时使用旧的数据提供查询，确保你在redis.conf中配置了这个功能。另外你可以配置当master连接不可以用（down掉）是slave返回error给客户端。然而，在旧数据集必须删除和新数据集必须加载时会有block客户端的链接的情况。</li>
+<li>Replication可以同时用于可扩展性，以便有多个slave进行只读查询，例如，sort操作可以交给到slave来分担，或只是为数据容灾。</li>
+<li>可以使用复制避免在master端的保存过程：只需要配置master的<code>redis.conf</code>避免存储（注释掉所有的<code>save</code>选项），然后不时的连接一个配置了<code>save</code>的slave。</li>
+</ul>
+<h3 id="replication-">Replication怎么工作</h3>
+<p>如果你安装了一个slave，不论他是第一次连接还是重连，连接后它会马上发送一个<code>SYNC</code>的命令。
+接着master启动后台存储，并收集所有接收到可以修改数据集的的新指令。</p>
+<p>当后端的存储完成，master把数据文件传输给slave，slave会先保存在硬盘上然后加载进内存中。再然后master将会发送所有积累的命令，和所有从客户端收到的新的用来修改数据集的命令。这些通过和redis协议相同格式的命令流的方式完成。</p>
+<p>你可以通过<code>telnet</code>尝试。在该服务器正在做一些工作时连接redis端口并发送<code>SYNC</code>指令。你会看到一个批量传输，然后所有master收到的指令会在telnet回话中重现。</p>
+<p>当master因为一些原因down掉时slave可以自动重连。如果master同步收到slave的同步请求，它只执行一个后台存储来提供给所有slave。</p>
+<p>当一个master和一个slave断开后重连，将会提交一个全同步。然而redis2.8以后，可以支持块重同步<em>(partial resynchronization)</em>。</p>
+<h3 id="-">块同步</h3>
+<p>从redis2.8开始，master和slave通常可以在断开重连后继续复制进程而不需要请求全同步。</p>
+<p>这个工作在master端为复制流使用了内存backlog，master和所有的slave保持同步的<code>replication offset</code>和<code>master run id</code>，所以当连接中断，slave重连并请求master继续复制，假设<code>master run id</code>没有变，并且<code>replication backlog</code>的offset可用的，如果条件满足，master只发送部分它丢失的复制流，并且复制继续。然而，在老版本的redis中会执行全同步。</p>
+<p>新的<em>partial resynchronization</em>功能内部使用<code>PSYNC</code>命令，老的实现使用<code>SYNC</code>，然而，一个redis2.8的slave可以检测服务器是否支持<code>PSYNC</code>，否则使用<code>SYNC</code>。</p>
+<h3 id="-">配置</h3>
+<p>配置replication很简单，只需要在slave的配置文件中添加如下行：</p>
+<pre><code>slaveof 192.168.1.1 6379
+</code></pre><p>当然你需要替换掉<code>192.168.1.1 6379</code>而使用你的主机<code>IP地址（或域名）</code>和<code>端口</code>。或者，你可以执行 <code>SLAVEOF</code>，master主机就会开始一个同步。
+也有一些参数用来调整master内存中的replication backlog来执行块同步。参见随redis发布的redis.conf示例了解更多信息。</p>
+<p>从redis2.6开始slave默认支持只读模式。这个行为被redis.conf里的“slave-read-only”选项控制。而且可以在运行中使用CONFIG SET启用或关闭。</p>
+<p>只读模式的slave会拒绝所有的写命令，所以即使在错误的情况下slave也不可能被写入。这并不意味着该同能被设想为把slave示例暴露在互联网或更普遍的存在不可信客户端的网络中。因为类似DEBUG和CONFIG的管理命令依旧可用。但是只读实例的安全性可以通过在redis.conf中使用重命名指令禁用命令而提高。</p>
+<p>你可能想知道为什么它可以恢复默认的，并有slave的实例，可以是目标写入操作。其原因是，虽然这个写入将被丢弃，如果从站和主会重新同步，或者如果从重新启动，常常有临时数据是不重要的，可以存储到slave。例如客户端可能需要提供关于slave到master的可达性信息来协调故障切换策略。</p>
+<h3 id="-slave-master-">设置slave到master的认证</h3>
+<p>如果你的master通过requirepass有密码认证，也可以很简单的配置salve在所有sync操作中使用密码认证。
+在正在运行的实例上，使用redis-cli和类型：</p>
+<pre><code>config set masterauth &lt;password&gt;
+</code></pre><p>永久的设置，在你的配置文件中添加</p>
+<pre><code>masterauth &lt;password&gt;
+</code></pre><h3 id="allow-writes-only-with-n-attached-replicas">Allow writes only with N attached replicas</h3>
+<p>从redis2.8起，为了提高数据安全性，可以配置一个redis master接受写查询在至少n个slave已连接到master时。
+然而，因为redis使用异步复制所以不可能确保接受的写入被确保实际写入，所以这成为丢失数据的一个窗口。    </p>
+<p>这是功能原理：</p>
+<ul>
+<li>redis slave每秒钟ping master，回应replication流被处理的数量。</li>
+<li>redis的master会记住它最后一次收到ping的时间。</li>
+<li>用户可以配置一个之后不超过几秒钟延迟的slave的最大数目。</li>
+</ul>
+<p>如果至少有n个slave，延迟了小于m秒，就会接受写操作。</p>
+<p>你可以在它认为作为一个宽松的版的“C”在CAP定理，其中一致性不能保证对于给定的写，但至少在时间窗口的数据丢失被限制为给定秒数。</p>
+<p>如果条件不具备，master会使用一个错误回复和写将不被接受代替回复。</p>
+<p>关于此功能的两个参数：</p>
+<pre><code>min-slaves-to-write &lt;number of slaves&gt;
+min-slaves-max-lag &lt;number of seconds&gt;
+</code></pre><p>欲了解更多信息，请随Redis的源代码分发的例子redis.conf文件。</p>
+  
+	</div>
+		<footer class="article-footer clearfix">
+
+  <div class="article-tags">
+  
+  <span></span> <a href="/tags/redis/">redis</a><a href="/tags/replication/">replication</a><a href="/tags/translate/">translate</a>
+  </div>
+
+
+<div class="article-categories">
+  <span></span>
+  <a class="article-category-link" href="/categories/tech/">tech</a>
+</div>
+
+
+
+<div class="article-share" id="share">
+
+  <div data-url="http://chongit.github.io/2013/12/13/redis-replication/" data-title="Redis Replication | Chova&#39;s house" data-tsina="null" class="share clearfix">
+  </div>
+
+</div>
+</footer>   	       
+	</article>
+	
+	
+</div>  
+      <div class="openaside"><a class="navbutton" href="#" title="显示侧边栏"></a></div>
+
+  <div id="toc" class="toc-aside">
+  <strong class="toc-title">文章目录</strong>
+  <ol class="toc"><li class="toc-item toc-level-2"><a class="toc-link" href="#replication"><span class="toc-number">1.</span> <span class="toc-text">Replication</span></a></li><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#replication-"><span class="toc-number">1.1.</span> <span class="toc-text">Replication怎么工作</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#-"><span class="toc-number">1.2.</span> <span class="toc-text">块同步</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#-"><span class="toc-number">1.3.</span> <span class="toc-text">配置</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#-slave-master-"><span class="toc-number">1.4.</span> <span class="toc-text">设置slave到master的认证</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#allow-writes-only-with-n-attached-replicas"><span class="toc-number">1.5.</span> <span class="toc-text">Allow writes only with N attached replicas</span></a></li></ol>
+  </div>
+
+<div id="asidepart">
+<div class="closeaside"><a class="closebutton" href="#" title="隐藏侧边栏"></a></div>
+<aside class="clearfix">
+
+  
+<div class="categorieslist">
+	<p class="asidetitle">分类</p>
+		<ul>
+		
+			<li><a href="/categories/tech/" title="tech">tech<sup>1</sup></a></li>
+		
+		</ul>
+</div>
+
+
+  
+<div class="tagslist">
+	<p class="asidetitle">标签</p>
+		<ul class="clearfix">
+		
+			<li><a href="/tags/redis/" title="redis">redis<sup>1</sup></a></li>
+		
+			<li><a href="/tags/replication/" title="replication">replication<sup>1</sup></a></li>
+		
+			<li><a href="/tags/translate/" title="translate">translate<sup>1</sup></a></li>
+		
+		</ul>
+</div>
+
+
+  <div class="rsspart">
+	<a href="null" target="_blank" title="rss">RSS 订阅</a>
+</div>
+
+</aside>
+</div>
+    </div>
+    <footer><div id="footer" >
+	
+	<div class="line">
+		<span></span>
+		<div class="author"></div>
+	</div>
+	
+	
+	<div class="social-font" class="clearfix">
+		
+		
+		
+		
+	</div>
+		<p class="copyright">Powered by <a href="http://zespia.tw/hexo/" target="_blank" title="hexo">hexo</a> and Theme by <a href="https://github.com/A-limon/pacman" target="_blank" title="Pacman">Pacman</a> © 2014 
+		
+		<a href="http://chongit.github.io" target="_blank" title="Chova">Chova</a>
+		
+		</p>
+</div>
+</footer>
+    <script src="/js/jquery-2.0.3.min.js"></script>
+<script type="text/javascript">
+$(document).ready(function(){ 
+  $('.navbar').click(function(){
+    $('header nav').toggleClass('shownav');
+  });
+  var myWidth = 0;
+  function getSize(){
+    if( typeof( window.innerWidth ) == 'number' ) {
+      myWidth = window.innerWidth;
+    } else if( document.documentElement && document.documentElement.clientWidth) {
+      myWidth = document.documentElement.clientWidth;
+    };
+  };
+  var m = $('#main'),
+      a = $('#asidepart'),
+      c = $('.closeaside'),
+      o = $('.openaside');
+  $(window).resize(function(){
+    getSize(); 
+    if (myWidth >= 1024) {
+      $('header nav').removeClass('shownav');
+    }else
+    {
+      m.removeClass('moveMain');
+      a.css('display', 'block').removeClass('fadeOut');
+      o.css('display', 'none');
+      
+      $('#toc.toc-aside').css('display', 'none');
+        
+    }
+  });
+  c.click(function(){
+    a.addClass('fadeOut').css('display', 'none');
+    o.css('display', 'block').addClass('fadeIn');
+    m.addClass('moveMain');
+  });
+  o.click(function(){
+    o.css('display', 'none').removeClass('beforeFadeIn');
+    a.css('display', 'block').removeClass('fadeOut').addClass('fadeIn');      
+    m.removeClass('moveMain');
+  });
+  $(window).scroll(function(){
+    o.css("top",Math.max(80,260-$(this).scrollTop()));
+  });
+});
+</script>
+
+<script type="text/javascript">
+$(document).ready(function(){ 
+  var ai = $('.article-content>iframe'),
+      ae = $('.article-content>embed'),
+      t  = $('#toc'),
+      h  = $('article h2')
+      ah = $('article h2'),
+      ta = $('#toc.toc-aside'),
+      o  = $('.openaside'),
+      c  = $('.closeaside');
+  if(ai.length>0){
+    ai.wrap('<div class="video-container" />');
+  };
+  if(ae.length>0){
+   ae.wrap('<div class="video-container" />');
+  };
+  if(ah.length==0){
+    t.css('display','none');
+  }else{
+    c.click(function(){
+      ta.css('display', 'block').addClass('fadeIn');
+    });
+    o.click(function(){
+      ta.css('display', 'none');
+    });
+    $(window).scroll(function(){
+      ta.css("top",Math.max(140,320-$(this).scrollTop()));
+    });
+  };
+});
+</script>
+
+
+<script type="text/javascript">
+$(document).ready(function(){ 
+  var $this = $('.share'),
+      url = $this.attr('data-url'),
+      encodedUrl = encodeURIComponent(url),
+      title = $this.attr('data-title'),
+      tsina = $this.attr('data-tsina');
+  var html = [
+  '<a href="#" class="overlay" id="qrcode"></a>',
+  '<div class="qrcode clearfix"><span>扫描二维码分享到微信朋友圈</span><a class="qrclose" href="#share"></a><strong>Loading...Please wait</strong><img id="qrcode-pic" data-src="http://s.jiathis.com/qrcode.php?url=' + encodedUrl + '"/></div>',
+  '<a href="#textlogo" class="article-back-to-top" title="Top"></a>',
+  '<a href="https://www.facebook.com/sharer.php?u=' + encodedUrl + '" class="article-share-facebook" target="_blank" title="Facebook"></a>',
+  '<a href="#qrcode" class="article-share-qrcode" title="QRcode"></a>',
+  '<a href="https://twitter.com/intent/tweet?url=' + encodedUrl + '" class="article-share-twitter" target="_blank" title="Twitter"></a>',
+  '<a href="http://service.weibo.com/share/share.php?title='+title+'&url='+encodedUrl +'&ralateUid='+ tsina +'&searchPic=true&style=number' +'" class="article-share-weibo" target="_blank" title="Weibo"></a>',
+  '<span title="Share to"></span>'
+  ].join('');
+  $this.append(html);
+  $('.article-share-qrcode').click(function(){
+    var imgSrc = $('#qrcode-pic').attr('data-src');
+    $('#qrcode-pic').attr('src', imgSrc);
+    $('#qrcode-pic').load(function(){
+        $('.qrcode strong').text(' ');
+    });
+  });
+});     
+</script>
+
+
+
+
+<link rel="stylesheet" href="/fancybox/jquery.fancybox.css" media="screen" type="text/css">
+<script src="/fancybox/jquery.fancybox.pack.js"></script>
+<script type="text/javascript">
+$(document).ready(function(){ 
+  $('.article-content').each(function(i){
+    $(this).find('img').each(function(){
+      if ($(this).parent().hasClass('fancybox')) return;
+      var alt = this.alt;
+      if (alt) $(this).after('<span class="caption">' + alt + '</span>');
+      $(this).wrap('<a href="' + this.src + '" title="' + alt + '" class="fancybox"></a>');
+    });
+    $(this).find('.fancybox').each(function(){
+      $(this).attr('rel', 'article' + i);
+    });
+  });
+  if($.fancybox){
+    $('.fancybox').fancybox();
+  }
+}); 
+</script>
+
+
+<script type="text/javascript">
+(function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+})(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+ga('create', 'UA-48447279-1', 'chongit.github.io');  
+ga('send', 'pageview');
+</script>
+
+
+  </body>
+</html>
